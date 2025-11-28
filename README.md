@@ -6,3 +6,4 @@ This will spawn a window, but you can ignore it. I/O will happen via the termina
 You'll need a GCC toolchain for risc-v ELF binaries to run the makefile.
 
 ## Other things
+This project is by Adrian Holdcraft and Madison Byrd.
