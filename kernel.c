@@ -2,50 +2,58 @@
 //                    KERNEL.C
 //==================================================
 
-// freestanding definitions
+// Basic NULL definition for freestanding C programs
 #define NULL ((void*)0)
 
+// Fixed-size integer types (no C standard library available)
 typedef unsigned char  uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int   uint32_t;
 typedef unsigned long  uint64_t;
 
-// minimal strlen
+//--------------------------------------------------
+//                BASIC STRING FUNCTIONS
+//--------------------------------------------------
+
+// Minimal strlen implementation
 static unsigned int strlen(const char *s) {
     unsigned int len = 0;
-    while (s[len]) len++;
+    while (s[len]) len++;       // Count chars until null terminator
     return len;
 }
 
-// minimal strcpy
+// Minimal strcpy implementation
 static void strcpy(char *dest, const char *src) {
-    while ((*dest++ = *src++)) ;
+    while ((*dest++ = *src++)) ; // Copy including '\0'
 }
-
 
 //--------------------------------------------------
 //                     UART
 //--------------------------------------------------
 
+// UART MMIO register offsets and base address
 #define UART0_BASE 0x10000000
 #define UART_TX    0x00
 #define UART_RX    0x00
-#define UART_LSR   0x05  /* Line status register */
-#define UART_LSR_DR 0x01 /* Data ready */
+#define UART_LSR   0x05         // Line Status Register offset
+#define UART_LSR_DR 0x01        // Data Ready bit
 
+// Output one byte to UART transmit register
 static inline void uart_putc(char c) {
     volatile uint8_t *tx = (volatile uint8_t *)(UART0_BASE + UART_TX);
     *tx = c;
 }
 
+// Output a null-terminated string to UART
 static inline void uart_puts(const char *s) {
     for (const char *p = s; *p; ++p) uart_putc(*p);
 }
 
+// Read one byte from UART receive register (blocking)
 static inline char uart_getc(void) {
     volatile uint8_t *lsr = (volatile uint8_t *)(UART0_BASE + UART_LSR);
     volatile uint8_t *rx  = (volatile uint8_t *)(UART0_BASE + UART_RX);
-    while (!(*lsr & UART_LSR_DR)) ; /* wait until data ready */
+    while (!(*lsr & UART_LSR_DR)) ; // Wait until data ready
     return *rx;
 }
 
@@ -53,11 +61,13 @@ static inline char uart_getc(void) {
 //                 STRING UTILITIES
 //--------------------------------------------------
 
+// Compare full strings (like strcmp)
 int strcmp(const char *a, const char *b) {
     while (*a && *b && *a == *b) a++, b++;
     return (unsigned char)*a - (unsigned char)*b;
 }
 
+// Compare up to n characters (like strncmp)
 int strncmp(const char *a, const char *b, unsigned int n) {
     unsigned int i;
     for (i = 0; i < n; i++) {
@@ -71,6 +81,7 @@ int strncmp(const char *a, const char *b, unsigned int n) {
 //                     INPUT
 //--------------------------------------------------
 
+// Read a line from UART into dest with backspace support
 void strin(char dest[], int len) {
     unsigned char chr;
     int i = 0;
@@ -80,21 +91,23 @@ void strin(char dest[], int len) {
 
         switch(chr) {
             case '\r':
-            case '\n':
+            case '\n':       // Enter pressed → finish input
                 dest[i] = '\0';
                 uart_puts("\r\n");
                 return;
-            case 0x7f: // backspace
+
+            case 0x7f:       // Backspace or delete
             case 0x08:
                 if (i > 0) {
-                    uart_puts("\b \b");
+                    uart_puts("\b \b"); // Remove character visually
                     i--;
                 }
                 break;
-            default:
+
+            default:         // Printable character
                 if (i < len - 1) {
                     dest[i++] = chr;
-                    uart_putc(chr);
+                    uart_putc(chr);  // Echo to screen
                 }
         }
     }
@@ -108,12 +121,14 @@ void strin(char dest[], int len) {
 #define MAX_FILES 16
 #define MAX_NODES 64
 
+// Node can be a file or directory
 typedef enum { FILE_NODE, DIR_NODE } NodeType;
 
+// Basic filesystem node structure
 typedef struct Node {
     char name[MAX_NAME];
     NodeType type;
-    char content[128];
+    char content[128];          // File content area
     struct Node *children[MAX_FILES];
     struct Node *parent;
     unsigned int child_count;
@@ -123,17 +138,23 @@ typedef struct Node {
 //            NODE POOL FOR ALLOCATION
 //--------------------------------------------------
 
+// Static pool, no malloc in freestanding kernel
 Node node_pool[MAX_NODES];
 unsigned int node_count = 0;
 
+// Allocate a fresh node from pool
 Node* fs_alloc_node(void) {
     if (node_count >= MAX_NODES) return NULL;
+
     Node *n = &node_pool[node_count++];
+
+    // Init all fields
     for (unsigned int i = 0; i < MAX_FILES; i++) n->children[i] = NULL;
     n->child_count = 0;
     for (unsigned int i = 0; i < MAX_NAME; i++) n->name[i] = 0;
     for (unsigned int i = 0; i < 128; i++) n->content[i] = 0;
     n->parent = NULL;
+
     return n;
 }
 
@@ -141,18 +162,19 @@ Node* fs_alloc_node(void) {
 //                 FILESYSTEM CORE
 //--------------------------------------------------
 
-Node root;
-Node *cwd;
+Node root;     // The root directory node
+Node *cwd;     // Current working directory pointer
 
+// Initialize filesystem: create root directory
 void fs_init(void) {
     Node *r = fs_alloc_node();
     r->type = DIR_NODE;
     cwd = r;
-    root = *r;
-    cwd = &root;
+    root = *r;     // Copy struct
+    cwd = &root;   // Use root as actual object
 }
 
-// find child by name
+// Search for a child node inside dir
 Node *fs_find(Node *dir, const char *name) {
     for (unsigned int i = 0; i < dir->child_count; i++) {
         if (strcmp(dir->children[i]->name, name) == 0)
@@ -165,41 +187,52 @@ Node *fs_find(Node *dir, const char *name) {
 //          PATH TRAVERSAL HELPER
 //--------------------------------------------------
 
+// Walk through a path (supports /, ., ..)
+// If create_missing = 1 → create directories while traversing
 Node* fs_traverse_path(const char *path, int create_missing) {
     Node *current = cwd;
 
-    // Absolute path starts from root
+    // Absolute path → start at root
     if (*path == '/') current = &root;
 
     char temp[MAX_NAME];
     int i = 0;
 
     while (*path) {
+        // When hitting slash or end of string → we reached a component
         if (*path == '/' || *(path+1) == '\0') {
             int len = i;
-            // include last char if not a slash
-            if (*(path+1) == '\0' && *path != '/') temp[len++] = *path;
-            temp[len] = 0;
 
-            i = 0; // reset temp index
+            // Add last character if string ends without slash
+            if (*(path+1) == '\0' && *path != '/')
+                temp[len++] = *path;
 
-            if (len == 0) { 
-                path++; 
-                continue; // skip empty components "//"
-            }
+            temp[len] = 0;  // Null-terminate
+            i = 0;          // Reset builder
 
-            // handle special components
+            if (len == 0) { path++; continue; } // Ignore duplicate slashes
+
+            // Handle "." → stay in same directory
             if (strcmp(temp, ".") == 0) {
-                // do nothing, stay in current
-            } else if (strcmp(temp, "..") == 0) {
-                if (current->parent) current = current->parent;
-            } else {
+                // no-op
+            }
+            // Handle ".." → go up one directory
+            else if (strcmp(temp, "..") == 0) {
+                if (current->parent)
+                    current = current->parent;
+            }
+            // Normal directory name
+            else {
                 Node *child = fs_find(current, temp);
 
                 if (!child) {
                     if (create_missing) {
+                        // Auto-create directory
                         child = fs_alloc_node();
-                        if (!child) { uart_puts("Node limit reached!\n"); return NULL; }
+                        if (!child) {
+                            uart_puts("Node limit reached!\n");
+                            return NULL;
+                        }
                         child->type = DIR_NODE;
                         child->parent = current;
                         strcpy(child->name, temp);
@@ -218,6 +251,7 @@ Node* fs_traverse_path(const char *path, int create_missing) {
                 current = child;
             }
         } else {
+            // Build component name
             if (i < MAX_NAME-1) temp[i++] = *path;
         }
 
@@ -227,102 +261,126 @@ Node* fs_traverse_path(const char *path, int create_missing) {
     return current;
 }
 
-
-
 //--------------------------------------------------
 //                 FILESYSTEM COMMANDS
 //--------------------------------------------------
 
+// Create directory (mkdir)
 void fs_mkdir(const char *path) {
     const char *last_slash = 0;
-    for (const char *p = path; *p; p++) if (*p == '/') last_slash = p;
+
+    // Find last slash to separate parent and name
+    for (const char *p = path; *p; p++)
+        if (*p == '/') last_slash = p;
 
     char new_dir_name[MAX_NAME];
     char parent_path[64];
 
+    // Case: creating inside cwd
     if (!last_slash) {
-        // Single directory in cwd
-        for (int j = 0; path[j] && j < MAX_NAME-1; j++) new_dir_name[j] = path[j];
+        for (int j = 0; path[j] && j < MAX_NAME-1; j++)
+            new_dir_name[j] = path[j];
         new_dir_name[strlen(path)] = 0;
-        new_dir_name[strlen(path)] = 0;
-        strcpy(parent_path, ""); // cwd
+        strcpy(parent_path, "");
     } else {
+        // Split into "parent path" and "new directory name"
         int len = last_slash - path;
-        if (len >= 64) { uart_puts("Path too long!\n"); return; }
         for (int i = 0; i < len; i++) parent_path[i] = path[i];
         parent_path[len] = 0;
 
         int j = 0;
         const char *name_ptr = last_slash + 1;
-        while (*name_ptr && j < MAX_NAME-1) new_dir_name[j++] = *name_ptr++;
+        while (*name_ptr && j < MAX_NAME-1)
+            new_dir_name[j++] = *name_ptr++;
         new_dir_name[j] = 0;
     }
 
+    // Parent directory lookup
     Node *parent = (*parent_path) ? fs_traverse_path(parent_path, 0) : cwd;
     if (!parent) return;
 
-    if (fs_find(parent, new_dir_name)) { uart_puts("Name already exists!\n"); return; }
-    if (parent->child_count >= MAX_FILES) { uart_puts("Directory full!\n"); return; }
+    // Check existence + capacity
+    if (fs_find(parent, new_dir_name)) {
+        uart_puts("Name already exists!\n");
+        return;
+    }
+    if (parent->child_count >= MAX_FILES) {
+        uart_puts("Directory full!\n");
+        return;
+    }
 
+    // Create new directory node
     Node *dir = fs_alloc_node();
     if (!dir) { uart_puts("Node limit reached!\n"); return; }
+
     dir->type = DIR_NODE;
     dir->parent = parent;
-
-    for (int k = 0; new_dir_name[k] && k < MAX_NAME-1; k++) dir->name[k] = new_dir_name[k];
-    dir->name[strlen(new_dir_name)] = 0;
+    strcpy(dir->name, new_dir_name);
 
     parent->children[parent->child_count++] = dir;
 }
 
+// Create empty file (touch)
 void fs_touch(const char *path) {
     const char *last_slash = NULL;
+
+    // Find last slash to split parent/name
     for (const char *p = path; *p; p++)
         if (*p == '/') last_slash = p;
 
     char file_name[MAX_NAME];
     char parent_path[64];
 
+    // Case: simple filename
     if (!last_slash) {
-        // No slashes → file in cwd
         int j;
-        for (j = 0; path[j] && j < MAX_NAME-1; j++) file_name[j] = path[j];
+        for (j = 0; path[j] && j < MAX_NAME-1; j++)
+            file_name[j] = path[j];
         file_name[j] = 0;
-        strcpy(parent_path, ""); // cwd
+        strcpy(parent_path, "");
     } else {
-        // Split path into parent directory and filename
+        // Split parent path
         int len = last_slash - path;
-        if (len >= 64) { uart_puts("Path too long!\n"); return; }
-        for (int i = 0; i < len; i++) parent_path[i] = path[i];
+        for (int i = 0; i < len; i++)
+            parent_path[i] = path[i];
         parent_path[len] = 0;
 
+        // Extract filename
         int j = 0;
         const char *name_ptr = last_slash + 1;
-        while (*name_ptr && j < MAX_NAME-1) file_name[j++] = *name_ptr++;
+        while (*name_ptr && j < MAX_NAME-1)
+            file_name[j++] = *name_ptr++;
         file_name[j] = 0;
     }
 
-    // Find parent directory
     Node *parent = (*parent_path) ? fs_traverse_path(parent_path, 0) : cwd;
     if (!parent) return;
 
-    if (fs_find(parent, file_name)) { uart_puts("Name already exists!\n"); return; }
-    if (parent->child_count >= MAX_FILES) { uart_puts("Directory full!\n"); return; }
+    if (fs_find(parent, file_name)) {
+        uart_puts("Name already exists!\n");
+        return;
+    }
+    if (parent->child_count >= MAX_FILES) {
+        uart_puts("Directory full!\n");
+        return;
+    }
 
+    // Create file node
     Node *file = fs_alloc_node();
     if (!file) { uart_puts("Node limit reached!\n"); return; }
+
     file->type = FILE_NODE;
     file->parent = parent;
-
-    for (int k = 0; file_name[k] && k < MAX_NAME-1; k++) file->name[k] = file_name[k];
-    file->name[strlen(file_name)] = 0;
+    strcpy(file->name, file_name);
 
     parent->children[parent->child_count++] = file;
 }
 
-
+// List directory contents (ls)
 void fs_ls(const char *path) {
     Node *dir;
+
+    // No path → use cwd
     if (!path || *path == '\0') {
         dir = cwd;
     } else {
@@ -339,19 +397,23 @@ void fs_ls(const char *path) {
     uart_puts("\n");
 }
 
-
+// Change directory (cd)
 void fs_cd(const char *path) {
     Node *target = fs_traverse_path(path, 0);
     if (target) cwd = target;
 }
 
+// Print working directory (pwd)
 void fs_pwd_recursive(Node *n) {
     if (n->parent == 0) {
         uart_puts("/");
         return;
     }
     fs_pwd_recursive(n->parent);
-    if (n != &root) { uart_putc('/'); uart_puts(n->name); }
+    if (n != &root) {
+        uart_putc('/');
+        uart_puts(n->name);
+    }
 }
 
 void fs_pwd(void) {
@@ -363,42 +425,50 @@ void fs_pwd(void) {
 //                   PROGRAM COMMANDS
 //==================================================
 
+// Write text into file
 void fs_write(const char *path, const char *text) {
     const char *last_slash = NULL;
+
+    // Separate path into parent + filename
     for (const char *p = path; *p; p++)
         if (*p == '/') last_slash = p;
 
     char file_name[MAX_NAME];
     char parent_path[64];
 
+    // Case: file is in cwd
     if (!last_slash) {
-        // File in cwd
         int j;
-        for (j = 0; path[j] && j < MAX_NAME-1; j++) file_name[j] = path[j];
+        for (j = 0; path[j] && j < MAX_NAME-1; j++)
+            file_name[j] = path[j];
         file_name[j] = 0;
-        strcpy(parent_path, ""); // cwd
+        strcpy(parent_path, "");
     } else {
         int len = last_slash - path;
-        if (len >= 64) { uart_puts("Path too long!\n"); return; }
-        for (int i = 0; i < len; i++) parent_path[i] = path[i];
+        for (int i = 0; i < len; i++)
+            parent_path[i] = path[i];
         parent_path[len] = 0;
 
         int j = 0;
         const char *name_ptr = last_slash + 1;
-        while (*name_ptr && j < MAX_NAME-1) file_name[j++] = *name_ptr++;
+        while (*name_ptr && j < MAX_NAME-1)
+            file_name[j++] = *name_ptr++;
         file_name[j] = 0;
     }
 
+    // Find parent
     Node *parent = (*parent_path) ? fs_traverse_path(parent_path, 0) : cwd;
     if (!parent) return;
 
+    // File must exist
     Node *file = fs_find(parent, file_name);
     if (!file) { uart_puts("File does not exist!\n"); return; }
     if (file->type != FILE_NODE) { uart_puts("Not a file!\n"); return; }
 
-    // Copy text into content (truncate if necessary)
+    // Write text to file->content
     int i;
-    for (i = 0; i < 127 && text[i]; i++) file->content[i] = text[i];
+    for (i = 0; i < 127 && text[i]; i++)
+        file->content[i] = text[i];
     file->content[i] = 0;
 
     uart_puts("File written.\n");
@@ -408,6 +478,7 @@ void fs_write(const char *path, const char *text) {
 //                   SHELL COMMANDS
 //==================================================
 
+// Print help menu
 void cmd_help(void) {
     uart_puts("Available commands:\n");
     uart_puts("  help             - Show this help message\n");
@@ -421,13 +492,17 @@ void cmd_help(void) {
     uart_puts("  cat              - Print text from a file\n");
 }
 
+// Echo text back to screen
 void cmd_echo(char *args) {
     uart_puts(args);
     uart_puts("\n");
 }
 
+// Print file content
 void fs_cat(const char *path) {
     const char *last_slash = NULL;
+
+    // Extract parent and file name
     for (const char *p = path; *p; p++)
         if (*p == '/') last_slash = p;
 
@@ -435,25 +510,24 @@ void fs_cat(const char *path) {
     char parent_path[64];
 
     if (!last_slash) {
-        // File in cwd
         int j;
-        for (j = 0; path[j] && j < MAX_NAME-1; j++) file_name[j] = path[j];
+        for (j = 0; path[j] && j < MAX_NAME-1; j++)
+            file_name[j] = path[j];
         file_name[j] = 0;
-        strcpy(parent_path, ""); // cwd
+        strcpy(parent_path, "");
     } else {
-        // Split path into parent directory and filename
         int len = last_slash - path;
-        if (len >= 64) { uart_puts("Path too long!\n"); return; }
-        for (int i = 0; i < len; i++) parent_path[i] = path[i];
+        for (int i = 0; i < len; i++)
+            parent_path[i] = path[i];
         parent_path[len] = 0;
 
         int j = 0;
         const char *name_ptr = last_slash + 1;
-        while (*name_ptr && j < MAX_NAME-1) file_name[j++] = *name_ptr++;
+        while (*name_ptr && j < MAX_NAME-1)
+            file_name[j++] = *name_ptr++;
         file_name[j] = 0;
     }
 
-    // Find parent directory
     Node *parent = (*parent_path) ? fs_traverse_path(parent_path, 0) : cwd;
     if (!parent) return;
 
@@ -461,14 +535,17 @@ void fs_cat(const char *path) {
     if (!file) { uart_puts("File does not exist!\n"); return; }
     if (file->type != FILE_NODE) { uart_puts("Not a file!\n"); return; }
 
-    // Print file content
     uart_puts(file->content);
     uart_puts("\n");
 }
 
+//==================================================
+//               COMMAND PARSER / SHELL
+//==================================================
 
+// Parse input string and run appropriate command
 void run_command(char *input) {
-    while (*input == ' ') input++;
+    while (*input == ' ') input++; // Skip leading spaces
 
     if (strncmp(input, "help", 4) == 0) {
         cmd_help();
@@ -498,13 +575,13 @@ void run_command(char *input) {
         char *args = input + 5;
         while (*args == ' ') args++;
 
-        // split path from text
+        // Split into: path + text
         char *space = args;
         while (*space && *space != ' ') space++;
         char *text = "";
         if (*space) {
-            *space++ = 0; // terminate path
-            while (*space == ' ') space++; // skip spaces before text
+            *space++ = 0;        // terminate path
+            while (*space == ' ') space++;
             text = space;
         }
 
@@ -517,9 +594,9 @@ void run_command(char *input) {
     else if (*input != '\0') {
         uart_puts("Unknown command. Type 'help' for a list.\n");
     }
-
-
 }
+
+
 
 //==================================================
 //                   KERNEL MAIN
