@@ -14,6 +14,7 @@ void cmd_help(void) {
     uart_puts("  echo <text>      - Echo text back\n");
     uart_puts("  mkdir <name>     - Create a new directory\n");
     uart_puts("  touch <name>     - Create a new empty file\n");
+    uart_puts("  touchro <name>   - Create a new read-only empty file\n");
     uart_puts("  ls               - List files and directories\n");
     uart_puts("  cd <name>        - Change directory\n");
     uart_puts("  pwd              - Show current directory path\n");
